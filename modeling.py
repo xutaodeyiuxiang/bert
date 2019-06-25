@@ -68,8 +68,8 @@ class BertConfig(object):
         initializing all weight matrices.
     """
     self.vocab_size = vocab_size
-    self.hidden_size = hidden_size
-    self.num_hidden_layers = num_hidden_layers
+    self.hidden_size = hidden_size           # 一个词的embedding size
+    self.num_hidden_layers = num_hidden_layers  # 有多少个transformer层
     self.num_attention_heads = num_attention_heads
     self.hidden_act = hidden_act
     self.intermediate_size = intermediate_size
@@ -158,11 +158,11 @@ class BertModel(object):
       config.hidden_dropout_prob = 0.0
       config.attention_probs_dropout_prob = 0.0
 
-    input_shape = get_shape_list(input_ids, expected_rank=2)
+    input_shape = get_shape_list(input_ids, expected_rank=2)  # [batch_size, seq_length]
     batch_size = input_shape[0]
     seq_length = input_shape[1]
 
-    if input_mask is None:
+    if input_mask is None:  # 0 是 mask，1 是 unmask
       input_mask = tf.ones(shape=[batch_size, seq_length], dtype=tf.int32)
 
     if token_type_ids is None:
@@ -171,6 +171,7 @@ class BertModel(object):
     with tf.variable_scope(scope, default_name="bert"):
       with tf.variable_scope("embeddings"):
         # Perform embedding lookup on the word ids.
+        # self.embedding_output  : [batch_size, seq_length, config.hidden_size]
         (self.embedding_output, self.embedding_table) = embedding_lookup(
             input_ids=input_ids,
             vocab_size=config.vocab_size,
@@ -181,6 +182,7 @@ class BertModel(object):
 
         # Add positional embeddings and token type embeddings, then layer
         # normalize and perform dropout.
+        # self.embedding_output  : [batch_size, seq_length, config.hidden_size]
         self.embedding_output = embedding_postprocessor(
             input_tensor=self.embedding_output,
             use_token_type=True,
@@ -361,6 +363,7 @@ def dropout(input_tensor, dropout_prob):
 
 def layer_norm(input_tensor, name=None):
   """Run layer normalization on the last dimension of the tensor."""
+  # layer norm 是在每一个训练样本上求均值和方差
   return tf.contrib.layers.layer_norm(
       inputs=input_tensor, begin_norm_axis=-1, begin_params_axis=-1, scope=name)
 
@@ -453,7 +456,7 @@ def embedding_postprocessor(input_tensor,
     initializer_range: float. Range of the weight initialization.
     max_position_embeddings: int. Maximum sequence length that might ever be
       used with this model. This can be longer than the sequence length of
-      input_tensor, but cannot be shorter.
+      input_tensor, but cannot be shorter. 类似于vocabulary的大小，这样embedding矩阵大小才能定下来
     dropout_prob: float. Dropout probability applied to the final output tensor.
 
   Returns:
@@ -467,7 +470,7 @@ def embedding_postprocessor(input_tensor,
   seq_length = input_shape[1]
   width = input_shape[2]
 
-  output = input_tensor
+  output = input_tensor  # word embedding
 
   if use_token_type:
     if token_type_ids is None:
@@ -479,12 +482,12 @@ def embedding_postprocessor(input_tensor,
         initializer=create_initializer(initializer_range))
     # This vocab will be small so we always do one-hot here, since it is always
     # faster for a small vocabulary.
-    flat_token_type_ids = tf.reshape(token_type_ids, [-1])
-    one_hot_ids = tf.one_hot(flat_token_type_ids, depth=token_type_vocab_size)
+    flat_token_type_ids = tf.reshape(token_type_ids, [-1]) # 其中shape为一个列表形式，特殊的一点是列表中可以存在-1。-1代表的含义是不用我们自己指定这一维的大小，函数会自动计算，相当于展开成一维
+    one_hot_ids = tf.one_hot(flat_token_type_ids, depth=token_type_vocab_size) # [batch_size * seq_length, vocab_size]
     token_type_embeddings = tf.matmul(one_hot_ids, token_type_table)
     token_type_embeddings = tf.reshape(token_type_embeddings,
                                        [batch_size, seq_length, width])
-    output += token_type_embeddings
+    output += token_type_embeddings # 加上 type embedding
 
   if use_position_embeddings:
     assert_op = tf.assert_less_equal(seq_length, max_position_embeddings)
@@ -502,6 +505,7 @@ def embedding_postprocessor(input_tensor,
       # for position [0, 1, 2, ..., max_position_embeddings-1], and the current
       # sequence has positions [0, 1, 2, ... seq_length-1], so we can just
       # perform a slice.
+      # [max_position_embeddings, width] ==> [seq_length, width]
       position_embeddings = tf.slice(full_position_embeddings, [0, 0],
                                      [seq_length, -1])
       num_dims = len(output.shape.as_list())
@@ -512,10 +516,10 @@ def embedding_postprocessor(input_tensor,
       position_broadcast_shape = []
       for _ in range(num_dims - 2):
         position_broadcast_shape.append(1)
-      position_broadcast_shape.extend([seq_length, width])
-      position_embeddings = tf.reshape(position_embeddings,
+      position_broadcast_shape.extend([seq_length, width]) # [1, seq_length, width]
+      position_embeddings = tf.reshape(position_embeddings, # [seq_length, width]
                                        position_broadcast_shape)
-      output += position_embeddings
+      output += position_embeddings # [batch_size, seq_length, width]
 
   output = layer_norm_and_dropout(output, dropout_prob)
   return output
@@ -825,7 +829,7 @@ def transformer_model(input_tensor,
   all_layer_outputs = []
   for layer_idx in range(num_hidden_layers):
     with tf.variable_scope("layer_%d" % layer_idx):
-      layer_input = prev_output
+      layer_input = prev_output  # [batch_size, seq_length * hidden_size]
 
       with tf.variable_scope("attention"):
         attention_heads = []
