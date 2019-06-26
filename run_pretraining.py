@@ -118,8 +118,9 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     for name in sorted(features.keys()):
       tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
 
-    input_ids = features["input_ids"]
-    input_mask = features["input_mask"]
+    input_ids = features["input_ids"]                     # 输入已经被[mask]过的序列
+    input_mask = features["input_mask"]                   # encoding时，当输入的长度小于最大长度，我们会加入padding，但是在计算attention
+                                                          # 的时候，不能将padding加入进去，所以用mask去去掉padding的权重
     segment_ids = features["segment_ids"]
     masked_lm_positions = features["masked_lm_positions"]
     masked_lm_ids = features["masked_lm_ids"]
