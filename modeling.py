@@ -67,17 +67,17 @@ class BertConfig(object):
       initializer_range: The stdev of the truncated_normal_initializer for
         initializing all weight matrices.
     """
-    self.vocab_size = vocab_size
+    self.vocab_size = vocab_size             # 原始词词典的大小
     self.hidden_size = hidden_size           # 一个词的embedding size
     self.num_hidden_layers = num_hidden_layers  # 有多少个transformer层
-    self.num_attention_heads = num_attention_heads
-    self.hidden_act = hidden_act
-    self.intermediate_size = intermediate_size
-    self.hidden_dropout_prob = hidden_dropout_prob
-    self.attention_probs_dropout_prob = attention_probs_dropout_prob
-    self.max_position_embeddings = max_position_embeddings
-    self.type_vocab_size = type_vocab_size
-    self.initializer_range = initializer_range
+    self.num_attention_heads = num_attention_heads  # 对于一个multi-head attention有多少个scaled dot-product attention
+    self.hidden_act = hidden_act                    # encoder和pooler的激活函数
+    self.intermediate_size = intermediate_size      # bottle neck的FFN前往网络的隐藏层节点个数
+    self.hidden_dropout_prob = hidden_dropout_prob  # 前向网络的dropout
+    self.attention_probs_dropout_prob = attention_probs_dropout_prob  # attention权重的dropout
+    self.max_position_embeddings = max_position_embeddings   # 相当于position embedding的词典大小
+    self.type_vocab_size = type_vocab_size                   #  type词典大小
+    self.initializer_range = initializer_range               # 随机化因子
 
   @classmethod
   def from_dict(cls, json_object):
@@ -162,6 +162,9 @@ class BertModel(object):
     batch_size = input_shape[0]
     seq_length = input_shape[1]
 
+    # 这个mask再encoding的时候一般全部设置成1，即完全unmask，
+    # 这个一般用在decoding一个序列的时候用的，从左到右decoding，先把右边的给mask掉，假装当前时刻只能看到前面时刻的信息
+    # 编码可以并行计算，一次性全部encoding出来，但解码不是一次把所有序列解出来的，而是像rnn一样一个一个解出来的，因为要用上一个位置的输入当作attention的query
     if input_mask is None:  # 0 是 mask，1 是 unmask
       input_mask = tf.ones(shape=[batch_size, seq_length], dtype=tf.int32)
 
@@ -193,7 +196,7 @@ class BertModel(object):
             position_embedding_name="position_embeddings",
             initializer_range=config.initializer_range,
             max_position_embeddings=config.max_position_embeddings,
-            dropout_prob=config.hidden_dropout_prob)
+            dropout_prob=config.hidden_dropout_prob) # dropout 只用在最后一层的FFN
 
       with tf.variable_scope("encoder"):
         # This converts a 2D mask of shape [batch_size, seq_length] to a 3D
@@ -663,10 +666,10 @@ def attention_layer(from_tensor,
   #   N = `num_attention_heads`
   #   H = `size_per_head`
 
-  from_tensor_2d = reshape_to_matrix(from_tensor)
-  to_tensor_2d = reshape_to_matrix(to_tensor)
+  from_tensor_2d = reshape_to_matrix(from_tensor)  # [batch_size, from_seq_length, from_width] => [batch_size * from_seq_length, from_width]
+  to_tensor_2d = reshape_to_matrix(to_tensor)      # [batch_size, to_seq_length, to_width] => [batch_size * to_seq_length, to_width]
 
-  # `query_layer` = [B*F, N*H]
+  # `query_layer` = [B*F, N*H]  仅仅线性变换
   query_layer = tf.layers.dense(
       from_tensor_2d,
       num_attention_heads * size_per_head,
@@ -674,7 +677,7 @@ def attention_layer(from_tensor,
       name="query",
       kernel_initializer=create_initializer(initializer_range))
 
-  # `key_layer` = [B*T, N*H]
+  # `key_layer` = [B*T, N*H] 仅仅线性变换
   key_layer = tf.layers.dense(
       to_tensor_2d,
       num_attention_heads * size_per_head,
@@ -682,7 +685,7 @@ def attention_layer(from_tensor,
       name="key",
       kernel_initializer=create_initializer(initializer_range))
 
-  # `value_layer` = [B*T, N*H]
+  # `value_layer` = [B*T, N*H] 仅仅线性变换
   value_layer = tf.layers.dense(
       to_tensor_2d,
       num_attention_heads * size_per_head,
@@ -690,7 +693,7 @@ def attention_layer(from_tensor,
       name="value",
       kernel_initializer=create_initializer(initializer_range))
 
-  # `query_layer` = [B, N, F, H]
+  # `query_layer` = [B, N, F, H]  将 from_width 均分成 num_attention_heads 个小向量， 每个小向量的维度是 size_per_head
   query_layer = transpose_for_scores(query_layer, batch_size,
                                      num_attention_heads, from_seq_length,
                                      size_per_head)
@@ -714,7 +717,7 @@ def attention_layer(from_tensor,
     # masked positions, this operation will create a tensor which is 0.0 for
     # positions we want to attend and -10000.0 for masked positions.
     adder = (1.0 - tf.cast(attention_mask, tf.float32)) * -10000.0
-
+    # 如果mask为0的话，就会加上一个很大的负数，导致最后的权重很小，如果是1的话，原有的score不会做任何改变
     # Since we are adding it to the raw scores before the softmax, this is
     # effectively the same as removing these entirely.
     attention_scores += adder
@@ -725,7 +728,7 @@ def attention_layer(from_tensor,
 
   # This is actually dropping out entire tokens to attend to, which might
   # seem a bit unusual, but is taken from the original Transformer paper.
-  attention_probs = dropout(attention_probs, attention_probs_dropout_prob)
+  attention_probs = dropout(attention_probs, attention_probs_dropout_prob)  # 丢弃某些query的向量
 
   # `value_layer` = [B, T, N, H]
   value_layer = tf.reshape(
@@ -735,12 +738,13 @@ def attention_layer(from_tensor,
   # `value_layer` = [B, N, T, H]
   value_layer = tf.transpose(value_layer, [0, 2, 1, 3])
 
-  # `context_layer` = [B, N, F, H]
+  # `context_layer` = [B, N, F, H]  做attention的输出
   context_layer = tf.matmul(attention_probs, value_layer)
 
   # `context_layer` = [B, F, N, H]
   context_layer = tf.transpose(context_layer, [0, 2, 1, 3])
 
+  # 将多个self-attention的小向量concat成hidden_size大小的向量
   if do_return_2d_tensor:
     # `context_layer` = [B*F, N*H]
     context_layer = tf.reshape(
@@ -780,7 +784,7 @@ def transformer_model(input_tensor,
     input_tensor: float Tensor of shape [batch_size, seq_length, hidden_size].
     attention_mask: (optional) int32 Tensor of shape [batch_size, seq_length,
       seq_length], with 1 for positions that can be attended to and 0 in
-      positions that should not be.
+      positions that should not be. 主要用于decoding， 在encoding的时候基本都是1
     hidden_size: int. Hidden size of the Transformer.
     num_hidden_layers: int. Number of layers (blocks) in the Transformer.
     num_attention_heads: int. Number of attention heads in the Transformer.
@@ -803,6 +807,8 @@ def transformer_model(input_tensor,
   Raises:
     ValueError: A Tensor shape or parameter is invalid.
   """
+  # 先将hidden_size分成num_attention_heads个小向量，对每个小向量做scaled dot-product attention，然后将
+  # 这些小向量concat回原始的维度
   if hidden_size % num_attention_heads != 0:
     raise ValueError(
         "The hidden size (%d) is not a multiple of the number of attention "
